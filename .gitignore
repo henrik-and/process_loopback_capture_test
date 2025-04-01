@@ -1,0 +1,43 @@
+.vs/
+# Ignore NuGet packages
+packages/
+
+# Ignore Visual Studio build artifacts
+*.obj
+*.iobj
+*.pdb
+*.ilk
+*.ipdb
+*.log
+*.tlog
+*.lastbuildstate
+*.user
+*.suo
+*.cache
+*.VC.db
+
+# Ignore Visual Studio build output folders
+Debug/
+Release/
+x64/
+x86/
+ARM/
+ARM64/
+*.obj
+*.exe
+*.dll
+*.lib
+*.pdb
+*.ilk
+*.idb
+*.ipch
+*.o
+*.a
+*.so
+*.log
+*.suo
+*.user
+*.vcxproj.user
+*.tlog
+*.log
+*.cache

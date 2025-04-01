@@ -54,6 +54,7 @@ CLoopbackCapture::~CLoopbackCapture()
 
 HRESULT CLoopbackCapture::ActivateAudioInterface(DWORD processId, bool includeProcessTree)
 {
+    std::cout << "___" << __func__ << std::endl;
     return SetDeviceStateErrorIfFailed([&]() -> HRESULT
         {
             AUDIOCLIENT_ACTIVATION_PARAMS audioclientActivationParams = {};
@@ -85,6 +86,7 @@ HRESULT CLoopbackCapture::ActivateAudioInterface(DWORD processId, bool includePr
 //
 HRESULT CLoopbackCapture::ActivateCompleted(IActivateAudioInterfaceAsyncOperation* operation)
 {
+    std::cout << "___" << __func__ << std::endl;
     m_activateResult = SetDeviceStateErrorIfFailed([&]()->HRESULT
         {
             // Check for a successful activation result
@@ -93,8 +95,24 @@ HRESULT CLoopbackCapture::ActivateCompleted(IActivateAudioInterfaceAsyncOperatio
             RETURN_IF_FAILED(operation->GetActivateResult(&hrActivateResult, &punkAudioInterface));
             RETURN_IF_FAILED(hrActivateResult);
 
-            // Get the pointer for the Audio Client
+            // Get the pointer for the Audio Client.
+            // Now, m_AudioClient is a fully initialized instance of IAudioClient that we can use for audio capture.
             RETURN_IF_FAILED(punkAudioInterface.copy_to(&m_AudioClient));
+
+            // Query for IAudioClient2
+            wil::com_ptr_nothrow<IAudioClient2> audioClient2;
+            RETURN_IF_FAILED(m_AudioClient.query_to(&audioClient2));
+
+            // Set stream options to use post-volume loopback
+            AudioClientProperties clientProperties = {};
+            clientProperties.cbSize = sizeof(AudioClientProperties);
+            clientProperties.bIsOffload = FALSE;
+            clientProperties.eCategory = AudioCategory_Other; 
+            // The audio client is requesting that the loopback stream tap into the playing audio after volume and/or mute settings have been applied.
+            // The default behavior is for the loopback stream to be tapped before volume and/or mute.
+            clientProperties.Options = AUDCLNT_STREAMOPTIONS_POST_VOLUME_LOOPBACK;
+
+            RETURN_IF_FAILED(audioClient2->SetClientProperties(&clientProperties));
 
             // The app can also call m_AudioClient->GetMixFormat instead to get the capture format.
             // 16 - bit PCM format.
@@ -209,6 +227,7 @@ HRESULT CLoopbackCapture::FixWAVHeader()
 
 HRESULT CLoopbackCapture::StartCaptureAsync(DWORD processId, bool includeProcessTree, PCWSTR outputFileName)
 {
+    std::cout << "___" << __func__ << std::endl;
     m_outputFileName = outputFileName;
     auto resetOutputFileName = wil::scope_exit([&] { m_outputFileName = nullptr; });
 
