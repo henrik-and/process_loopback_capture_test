@@ -21,10 +21,11 @@ public:
     CLoopbackCapture() = default;
     ~CLoopbackCapture();
 
-    HRESULT StartCaptureAsync(DWORD processId, bool includeProcessTree, PCWSTR outputFileName);
+    HRESULT StartCaptureAsync(DWORD processId, bool includeProcessTree, PCWSTR outputFileName, bool systemLoopback);
     HRESULT StopCaptureAsync();
 
     void MuteCapturedProcess(DWORD captured_process_id);
+    void UnMuteCapturedProcess();
 
     METHODASYNCCALLBACK(CLoopbackCapture, StartCapture, OnStartCapture);
     METHODASYNCCALLBACK(CLoopbackCapture, StopCapture, OnStopCapture);
@@ -58,7 +59,9 @@ private:
     HRESULT FixWAVHeader();
     HRESULT OnAudioSampleRequested();
 
-    HRESULT ActivateAudioInterface(DWORD processId, bool includeProcessTree);
+    HRESULT ActivateAudioInterface(DWORD processId,
+                                   bool includeProcessTree,
+                                   bool systemLoopback);
     HRESULT FinishCaptureAsync();
 
     HRESULT SetDeviceStateErrorIfFailed(HRESULT hr);
@@ -68,6 +71,7 @@ private:
     UINT32 m_BufferFrames = 0;
     wil::com_ptr_nothrow<IAudioCaptureClient> m_AudioCaptureClient;
     wil::com_ptr_nothrow<IMFAsyncResult> m_SampleReadyAsyncResult;
+    wil::com_ptr_nothrow<ISimpleAudioVolume> m_SimpleAudioVolume;
 
     wil::unique_event_nothrow m_SampleReadyEvent;
     MFWORKITEM_KEY m_SampleReadyKey = 0;

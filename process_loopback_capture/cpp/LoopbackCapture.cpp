@@ -11,6 +11,34 @@
 
 #define BITS_PER_BYTE 8
 
+void PrintWaveFormat(const WAVEFORMATEX& format)
+{
+  std::cout << "WAVEFORMATEX:" << std::endl;
+  std::cout << "  size: " << sizeof(format) << std::endl;
+  std::cout << "  Format Tag:         " << format.wFormatTag << " ("
+            << ((format.wFormatTag == WAVE_FORMAT_PCM) ? "PCM" :
+               (format.wFormatTag == WAVE_FORMAT_IEEE_FLOAT) ? "IEEE Float" :
+               "Other") << ")" << std::endl;
+  std::cout << "  Channels:           " << format.nChannels << std::endl;
+  std::cout << "  Sample Rate:        " << format.nSamplesPerSec << " Hz" << std::endl;
+  std::cout << "  Bits Per Sample:    " << format.wBitsPerSample << " bits" << std::endl;
+  std::cout << "  Block Align:        " << format.nBlockAlign << " bytes" << std::endl;
+  std::cout << "  Avg Bytes Per Sec:  " << format.nAvgBytesPerSec << " bytes/sec" << std::endl;
+
+  // Handle WAVEFORMATEXTENSIBLE (if applicable)
+  if (format.wFormatTag == WAVE_FORMAT_EXTENSIBLE)
+  {
+    auto* extFormat = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(&format);
+    std::cout << "  WAVEFORMATEXTENSIBLE:" << std::endl;
+    std::cout << "    Valid Bits Per Sample: " << extFormat->Samples.wValidBitsPerSample << std::endl;
+    std::cout << "    Channel Mask:         " << extFormat->dwChannelMask << std::endl;
+    std::cout << "    SubFormat GUID:       "
+              << (extFormat->SubFormat == KSDATAFORMAT_SUBTYPE_PCM ? "PCM" :
+                 extFormat->SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT ? "IEEE Float" : "Other")
+              << std::endl;
+  }
+}
+
 HRESULT CLoopbackCapture::SetDeviceStateErrorIfFailed(HRESULT hr)
 {
     if (FAILED(hr))
@@ -52,11 +80,64 @@ CLoopbackCapture::~CLoopbackCapture()
     }
 }
 
-HRESULT CLoopbackCapture::ActivateAudioInterface(DWORD processId, bool includeProcessTree)
+HRESULT CLoopbackCapture::ActivateAudioInterface(DWORD processId, bool includeProcessTree, bool systemLoopback)
 {
-    std::cout << "___" << __func__ << std::endl;
+    // std::cout << "___" << __func__ << std::endl;
     return SetDeviceStateErrorIfFailed([&]() -> HRESULT
         {
+            if (systemLoopback)
+            {
+                std::cout << "Using system audio looback!" << std::endl;
+                // System-wide loopbak using IMMDevice
+                wil::com_ptr_nothrow<IMMDeviceEnumerator> deviceEnumerator;
+                RETURN_IF_FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&deviceEnumerator)));
+
+                wil::com_ptr_nothrow<IMMDevice> audioDevice;
+                RETURN_IF_FAILED(deviceEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &audioDevice));
+
+                // Activate the Audio Client for loopback capture
+                RETURN_IF_FAILED(audioDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&m_AudioClient)));
+
+                wil::unique_cotaskmem_ptr<WAVEFORMATEX> mixFormat;
+                RETURN_IF_FAILED(m_AudioClient->GetMixFormat(reinterpret_cast<WAVEFORMATEX**>(&mixFormat)));
+
+                m_CaptureFormat.wFormatTag = WAVE_FORMAT_PCM;
+                m_CaptureFormat.nChannels = mixFormat->nChannels;
+                m_CaptureFormat.nSamplesPerSec = mixFormat->nSamplesPerSec;
+                m_CaptureFormat.wBitsPerSample = 16;
+                m_CaptureFormat.nBlockAlign = m_CaptureFormat.nChannels * m_CaptureFormat.wBitsPerSample / BITS_PER_BYTE;
+                m_CaptureFormat.nAvgBytesPerSec = m_CaptureFormat.nSamplesPerSec * m_CaptureFormat.nBlockAlign;
+                PrintWaveFormat(m_CaptureFormat);
+
+                // Initialize the AudioClient in Shared Mode with the user specified buffer
+                RETURN_IF_FAILED(m_AudioClient->Initialize(AUDCLNT_SHAREMODE_SHARED,
+                  AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                  200000,
+                  AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+                  &m_CaptureFormat,
+                  nullptr));
+
+                // Get the maximum size of the AudioClient Buffer
+                RETURN_IF_FAILED(m_AudioClient->GetBufferSize(&m_BufferFrames));
+
+                // Get the capture client
+                RETURN_IF_FAILED(m_AudioClient->GetService(IID_PPV_ARGS(&m_AudioCaptureClient)));
+
+                // Create Async callback for sample events
+                RETURN_IF_FAILED(MFCreateAsyncResult(nullptr, &m_xSampleReady, nullptr, &m_SampleReadyAsyncResult));
+
+                // Tell the system which event handle it should signal when an audio buffer is ready to be processed by the client
+                RETURN_IF_FAILED(m_AudioClient->SetEventHandle(m_SampleReadyEvent.get()));
+
+                // Creates the WAV file.
+                RETURN_IF_FAILED(CreateWAVFile());
+
+                // Everything is ready.
+                m_DeviceState = DeviceState::Initialized;
+                
+                return S_OK;  // No async activation required
+            }
+
             AUDIOCLIENT_ACTIVATION_PARAMS audioclientActivationParams = {};
             audioclientActivationParams.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
             audioclientActivationParams.ProcessLoopbackParams.ProcessLoopbackMode = includeProcessTree ?
@@ -77,6 +158,26 @@ HRESULT CLoopbackCapture::ActivateAudioInterface(DWORD processId, bool includePr
             return m_activateResult;
         }());
 }
+
+/*
+  if (!m_ActivatedViaAsync) {
+      // Query for IAudioClient2
+      wil::com_ptr_nothrow<IAudioClient2> audioClient2;
+      RETURN_IF_FAILED(m_AudioClient.query_to(&audioClient2));
+
+      // Set stream options to use post-volume loopback
+      AudioClientProperties clientProperties = {};
+      clientProperties.cbSize = sizeof(AudioClientProperties);
+      clientProperties.bIsOffload = FALSE;
+      clientProperties.eCategory = AudioCategory_Other;
+      // The audio client is requesting that the loopback stream tap into the playing
+      // audio after volume and/or mute settings have been applied.
+      // The default behavior is for the loopback stream to be tapped before volume and/or mute.
+      clientProperties.Options = AUDCLNT_STREAMOPTIONS_POST_VOLUME_LOOPBACK;
+
+      RETURN_IF_FAILED(audioClient2->SetClientProperties(&clientProperties));
+  }
+ */
 
 //
 //  ActivateCompleted()
@@ -99,21 +200,6 @@ HRESULT CLoopbackCapture::ActivateCompleted(IActivateAudioInterfaceAsyncOperatio
             // Now, m_AudioClient is a fully initialized instance of IAudioClient that we can use for audio capture.
             RETURN_IF_FAILED(punkAudioInterface.copy_to(&m_AudioClient));
 
-            // Query for IAudioClient2
-            wil::com_ptr_nothrow<IAudioClient2> audioClient2;
-            RETURN_IF_FAILED(m_AudioClient.query_to(&audioClient2));
-
-            // Set stream options to use post-volume loopback
-            AudioClientProperties clientProperties = {};
-            clientProperties.cbSize = sizeof(AudioClientProperties);
-            clientProperties.bIsOffload = FALSE;
-            clientProperties.eCategory = AudioCategory_Other; 
-            // The audio client is requesting that the loopback stream tap into the playing audio after volume and/or mute settings have been applied.
-            // The default behavior is for the loopback stream to be tapped before volume and/or mute.
-            clientProperties.Options = AUDCLNT_STREAMOPTIONS_POST_VOLUME_LOOPBACK;
-
-            RETURN_IF_FAILED(audioClient2->SetClientProperties(&clientProperties));
-
             // The app can also call m_AudioClient->GetMixFormat instead to get the capture format.
             // 16 - bit PCM format.
             m_CaptureFormat.wFormatTag = WAVE_FORMAT_PCM;
@@ -122,6 +208,8 @@ HRESULT CLoopbackCapture::ActivateCompleted(IActivateAudioInterfaceAsyncOperatio
             m_CaptureFormat.wBitsPerSample = 16;
             m_CaptureFormat.nBlockAlign = m_CaptureFormat.nChannels * m_CaptureFormat.wBitsPerSample / BITS_PER_BYTE;
             m_CaptureFormat.nAvgBytesPerSec = m_CaptureFormat.nSamplesPerSec * m_CaptureFormat.nBlockAlign;
+
+            PrintWaveFormat(m_CaptureFormat);
 
             // Initialize the AudioClient in Shared Mode with the user specified buffer
             RETURN_IF_FAILED(m_AudioClient->Initialize(AUDCLNT_SHAREMODE_SHARED,
@@ -225,14 +313,14 @@ HRESULT CLoopbackCapture::FixWAVHeader()
     return S_OK;
 }
 
-HRESULT CLoopbackCapture::StartCaptureAsync(DWORD processId, bool includeProcessTree, PCWSTR outputFileName)
+HRESULT CLoopbackCapture::StartCaptureAsync(DWORD processId, bool includeProcessTree, PCWSTR outputFileName, bool systemLoopback)
 {
-    std::cout << "___" << __func__ << std::endl;
+    std::cout << "___" << __func__ << "systemLoopback=" << systemLoopback << std::endl;
     m_outputFileName = outputFileName;
     auto resetOutputFileName = wil::scope_exit([&] { m_outputFileName = nullptr; });
 
     RETURN_IF_FAILED(InitializeLoopbackCapture());
-    RETURN_IF_FAILED(ActivateAudioInterface(processId, includeProcessTree));
+    RETURN_IF_FAILED(ActivateAudioInterface(processId, includeProcessTree, systemLoopback));
 
     // We should be in the initialzied state if this is the first time through getting ready to capture.
     if (m_DeviceState == DeviceState::Initialized)
@@ -251,6 +339,7 @@ HRESULT CLoopbackCapture::StartCaptureAsync(DWORD processId, bool includeProcess
 //
 HRESULT CLoopbackCapture::OnStartCapture(IMFAsyncResult* pResult)
 {
+    // std::cout << "___" << __func__ << std::endl;
     return SetDeviceStateErrorIfFailed([&]()->HRESULT
         {
             // Start the capture
@@ -271,6 +360,7 @@ HRESULT CLoopbackCapture::OnStartCapture(IMFAsyncResult* pResult)
 //
 HRESULT CLoopbackCapture::StopCaptureAsync()
 {
+    // std::cout << "___" << __func__ << std::endl;
     RETURN_HR_IF(E_NOT_VALID_STATE, (m_DeviceState != DeviceState::Capturing) &&
         (m_DeviceState != DeviceState::Error));
 
@@ -291,6 +381,7 @@ HRESULT CLoopbackCapture::StopCaptureAsync()
 //
 HRESULT CLoopbackCapture::OnStopCapture(IMFAsyncResult* pResult)
 {
+    // std::cout << "___" << __func__ << std::endl;
     // Stop capture by cancelling Work Item
     // Cancel the queued work item (if any)
     if (0 != m_SampleReadyKey)
@@ -307,6 +398,7 @@ HRESULT CLoopbackCapture::OnStopCapture(IMFAsyncResult* pResult)
 
 void CLoopbackCapture::MuteCapturedProcess(DWORD captured_process_id)
 {
+    // std::cout << "___" << __func__ << std::endl;
     IMMDeviceEnumerator* device_enumerator = nullptr;
     const CLSID CLSID_MMDeviceEnumerator = __uuidof(MMDeviceEnumerator);
     const IID IID_MMDeviceEnumerator = __uuidof(IMMDeviceEnumerator);
@@ -335,6 +427,7 @@ void CLoopbackCapture::MuteCapturedProcess(DWORD captured_process_id)
         return;
     }
 
+    std::wcout << L"Number of devices=" << n_devices << std::endl;
     for (UINT i = 0; i < n_devices; i++) {
         IMMDevice* device;
         hr = device_collection->Item(i, &device);
@@ -362,6 +455,7 @@ void CLoopbackCapture::MuteCapturedProcess(DWORD captured_process_id)
         if (hr != S_OK) {
             continue;
         }
+        std::wcout << L"Number of sessions=" << n_sessions << std::endl;
 
         IAudioSessionControl* audio_session_control = nullptr;
         LPWSTR pswSession = NULL;
@@ -401,17 +495,16 @@ void CLoopbackCapture::MuteCapturedProcess(DWORD captured_process_id)
             }
             std::wcout << L"PID: " << process_id << L"  Session id: " << session_id << std::endl;
 
-            ISimpleAudioVolume* simple_audio_volume = nullptr;
             std::wcout << L"PID: " << process_id << L"captured PID " << captured_process_id << std::endl;
             if (process_id == captured_process_id) {
-                hr = audio_session_control->QueryInterface(&simple_audio_volume);
+                hr = audio_session_control->QueryInterface(IID_PPV_ARGS(&m_SimpleAudioVolume));
                 if (hr != S_OK) {
                     std::wcout << L"Failed to query ISimpleAudioVolume from IAudioSessionControl." << std::endl;
                     continue;
                 }
 
                 std::wcout << L"Found matching PID. Muting application" << std::endl;
-                hr = simple_audio_volume->SetMute(true, NULL);
+                hr = m_SimpleAudioVolume->SetMute(true, NULL);
                 if (hr != S_OK) {
                     std::wcout << L"Failed to mute application." << std::endl;
                 }
@@ -419,6 +512,19 @@ void CLoopbackCapture::MuteCapturedProcess(DWORD captured_process_id)
             }
 
         }
+    }
+}
+
+void CLoopbackCapture::UnMuteCapturedProcess()
+{
+    // std::cout << "___" << __func__ << std::endl;
+    if (!m_SimpleAudioVolume) {
+      return;
+    }
+
+    HRESULT hr = m_SimpleAudioVolume->SetMute(false, NULL);
+    if (hr != S_OK) {
+      std::wcout << L"Failed to un-mute application." << std::endl;
     }
 }
 

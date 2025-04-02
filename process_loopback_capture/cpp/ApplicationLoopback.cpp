@@ -8,12 +8,13 @@
 void usage()
 {
     std::wcout <<
-        L"Usage: ApplicationLoopback <pid> <includetree|excludetree> <outputfilename>\n"
+        L"Usage: ApplicationLoopback <pid> <includetree|excludetree> <outputfilename> [systemloopback]\n"
         L"\n"
         L"<pid> is the process ID to capture or exclude from capture\n"
-        L"includetree includes audio from that process and its child processes\n"
-        L"excludetree includes audio from all processes except that process and its child processes\n"
+        L"<includetree> includes audio from that process and its child processes\n"
+        L"<excludetree> includes audio from all processes except that process and its child processes\n"
         L"<outputfilename> is the WAV file to receive the captured audio (10 seconds)\n"
+        L"[systemloopback] (optional) captures system-wide audio instead of per-process audio if set to 'systemloopback'\n"
         L"\n"
         L"Examples:\n"
         L"\n"
@@ -28,10 +29,10 @@ void usage()
 
 int wmain(int argc, wchar_t* argv[])
 {
-    if (argc != 4)
+    if (argc < 4 || argc > 5)  // Allow 4 or 5 arguments
     {
-        usage();
-        return 0;
+      usage();
+      return 0;
     }
 
     DWORD processId = wcstoul(argv[1], nullptr, 0);
@@ -58,8 +59,15 @@ int wmain(int argc, wchar_t* argv[])
 
     PCWSTR outputFile = argv[3];
 
+    // Optional parameter: systemloopback
+    bool systemLoopback = false;
+    if (argc == 5 && wcscmp(argv[4], L"systemloopback") == 0)
+    {
+        systemLoopback = true;
+    }
+                                                                                                   
     CLoopbackCapture loopbackCapture;
-    HRESULT hr = loopbackCapture.StartCaptureAsync(processId, includeProcessTree, outputFile);
+    HRESULT hr = loopbackCapture.StartCaptureAsync(processId, includeProcessTree, outputFile, systemLoopback);         
     if (FAILED(hr))
     {
         wil::unique_hlocal_string message;
@@ -75,6 +83,9 @@ int wmain(int argc, wchar_t* argv[])
         std::wcout << L"Muting captured application for 10 seconds." << std::endl;
         loopbackCapture.MuteCapturedProcess(processId);
         Sleep(10000);
+
+        std::wcout << L"Unmuting captured application and stops capturing." << std::endl;
+        loopbackCapture.UnMuteCapturedProcess();
 
         loopbackCapture.StopCaptureAsync();
 
