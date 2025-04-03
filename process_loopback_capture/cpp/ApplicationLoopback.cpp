@@ -80,11 +80,19 @@ int wmain(int argc, wchar_t* argv[])
         std::wcout << L"Capturing 10 seconds of audio." << std::endl;
         Sleep(10000);
 
-        std::wcout << L"Muting captured application for 10 seconds." << std::endl;
-        loopbackCapture.MuteCapturedProcess(processId);
+        std::wcout << L"Muting session for 10 seconds." << std::endl;
+        loopbackCapture.MuteCapturedProcess(processId, false);
         Sleep(10000);
 
-        std::wcout << L"Unmuting captured application and stops capturing." << std::endl;
+        if (systemLoopback) {
+          // First unmute the session audio.
+          loopbackCapture.UnMuteCapturedProcess();
+          std::wcout << L"Muting endpoint for 10 seconds." << std::endl;
+          loopbackCapture.MuteCapturedProcess(processId, true);
+          Sleep(10000);
+        }
+
+        std::wcout << L"Unmuting and stops capturing." << std::endl;
         loopbackCapture.UnMuteCapturedProcess();
 
         loopbackCapture.StopCaptureAsync();

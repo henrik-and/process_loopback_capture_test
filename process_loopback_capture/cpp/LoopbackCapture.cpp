@@ -96,7 +96,11 @@ HRESULT CLoopbackCapture::ActivateAudioInterface(DWORD processId, bool includePr
                 RETURN_IF_FAILED(deviceEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &audioDevice));
 
                 // Activate the Audio Client for loopback capture
-                RETURN_IF_FAILED(audioDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&m_AudioClient)));
+                RETURN_IF_FAILED(audioDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+                                                       reinterpret_cast<void**>(&m_AudioClient)));
+
+                RETURN_IF_FAILED(audioDevice->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL,
+                                                       nullptr, reinterpret_cast<void**>(&m_AudioEndpointVolume)));
 
                 wil::unique_cotaskmem_ptr<WAVEFORMATEX> mixFormat;
                 RETURN_IF_FAILED(m_AudioClient->GetMixFormat(reinterpret_cast<WAVEFORMATEX**>(&mixFormat)));
@@ -107,7 +111,30 @@ HRESULT CLoopbackCapture::ActivateAudioInterface(DWORD processId, bool includePr
                 m_CaptureFormat.wBitsPerSample = 16;
                 m_CaptureFormat.nBlockAlign = m_CaptureFormat.nChannels * m_CaptureFormat.wBitsPerSample / BITS_PER_BYTE;
                 m_CaptureFormat.nAvgBytesPerSec = m_CaptureFormat.nSamplesPerSec * m_CaptureFormat.nBlockAlign;
-                PrintWaveFormat(m_CaptureFormat);
+                // PrintWaveFormat(m_CaptureFormat);
+       
+                // Query for IAudioClient2
+                wil::com_ptr_nothrow<IAudioClient2> audioClient2;
+                RETURN_IF_FAILED(m_AudioClient.query_to(&audioClient2));
+
+                // Set stream options to use post-volume loopback
+                AudioClientProperties clientProperties = {};
+                clientProperties.cbSize = sizeof(AudioClientProperties);
+                clientProperties.bIsOffload = FALSE;
+                clientProperties.eCategory = AudioCategory_Other;
+                // The audio client is requesting that the loopback stream tap into the playing
+                // audio after volume and/or mute settings have been applied.
+                // The default behavior is for the loopback stream to be tapped before volume and/or mute.
+                clientProperties.Options = AUDCLNT_STREAMOPTIONS_POST_VOLUME_LOOPBACK;
+
+                HRESULT hr = audioClient2->SetClientProperties(&clientProperties);
+                if (FAILED(hr)) {
+                  if (FAILED(hr)) {
+                    std::cout << "POST_VOLUME_LOOPBACK not supported! Falling back to default.\n";
+                    clientProperties.Options = AUDCLNT_STREAMOPTIONS_NONE;
+                    RETURN_IF_FAILED(audioClient2->SetClientProperties(&clientProperties));
+                  }
+                }
 
                 // Initialize the AudioClient in Shared Mode with the user specified buffer
                 RETURN_IF_FAILED(m_AudioClient->Initialize(AUDCLNT_SHAREMODE_SHARED,
@@ -134,6 +161,8 @@ HRESULT CLoopbackCapture::ActivateAudioInterface(DWORD processId, bool includePr
 
                 // Everything is ready.
                 m_DeviceState = DeviceState::Initialized;
+
+                m_systemLoopback = true;
                 
                 return S_OK;  // No async activation required
             }
@@ -158,26 +187,6 @@ HRESULT CLoopbackCapture::ActivateAudioInterface(DWORD processId, bool includePr
             return m_activateResult;
         }());
 }
-
-/*
-  if (!m_ActivatedViaAsync) {
-      // Query for IAudioClient2
-      wil::com_ptr_nothrow<IAudioClient2> audioClient2;
-      RETURN_IF_FAILED(m_AudioClient.query_to(&audioClient2));
-
-      // Set stream options to use post-volume loopback
-      AudioClientProperties clientProperties = {};
-      clientProperties.cbSize = sizeof(AudioClientProperties);
-      clientProperties.bIsOffload = FALSE;
-      clientProperties.eCategory = AudioCategory_Other;
-      // The audio client is requesting that the loopback stream tap into the playing
-      // audio after volume and/or mute settings have been applied.
-      // The default behavior is for the loopback stream to be tapped before volume and/or mute.
-      clientProperties.Options = AUDCLNT_STREAMOPTIONS_POST_VOLUME_LOOPBACK;
-
-      RETURN_IF_FAILED(audioClient2->SetClientProperties(&clientProperties));
-  }
- */
 
 //
 //  ActivateCompleted()
@@ -315,7 +324,7 @@ HRESULT CLoopbackCapture::FixWAVHeader()
 
 HRESULT CLoopbackCapture::StartCaptureAsync(DWORD processId, bool includeProcessTree, PCWSTR outputFileName, bool systemLoopback)
 {
-    std::cout << "___" << __func__ << "systemLoopback=" << systemLoopback << std::endl;
+    // std::cout << "___" << __func__;
     m_outputFileName = outputFileName;
     auto resetOutputFileName = wil::scope_exit([&] { m_outputFileName = nullptr; });
 
@@ -396,8 +405,34 @@ HRESULT CLoopbackCapture::OnStopCapture(IMFAsyncResult* pResult)
     return FinishCaptureAsync();
 }
 
-void CLoopbackCapture::MuteCapturedProcess(DWORD captured_process_id)
+void CLoopbackCapture::MuteCapturedProcess(DWORD captured_process_id, bool muteEndpoint)
 {
+    if (m_systemLoopback) {
+      if (muteEndpoint) {
+        HRESULT hr = m_AudioEndpointVolume->SetMute(true, nullptr);
+        return;
+      }
+
+      HRESULT hr = m_AudioClient->GetService(IID_PPV_ARGS(&m_SimpleAudioVolume));
+      if (hr != S_OK) {
+        std::wcout << L"Failed to query ISimpleAudioVolume from IAudioClient." << std::endl;
+        return;
+      }
+
+      float volume;
+      m_SimpleAudioVolume->GetMasterVolume(&volume);
+      std::wcout << "Current volume=" << volume << std::endl;
+
+      std::wcout << L"Muting the audio session." << std::endl;
+      hr = m_SimpleAudioVolume->SetMute(true, NULL);
+      if (hr != S_OK) {
+        std::wcout << L"Failed to mute application." << std::endl;
+      }
+      m_SimpleAudioVolume->GetMasterVolume(&volume);
+      std::wcout << "Volume after mute=" << volume << std::endl;
+      return;
+    }
+
     // std::cout << "___" << __func__ << std::endl;
     IMMDeviceEnumerator* device_enumerator = nullptr;
     const CLSID CLSID_MMDeviceEnumerator = __uuidof(MMDeviceEnumerator);
@@ -517,6 +552,10 @@ void CLoopbackCapture::MuteCapturedProcess(DWORD captured_process_id)
 
 void CLoopbackCapture::UnMuteCapturedProcess()
 {
+    if (m_AudioEndpointVolume) {
+      m_AudioEndpointVolume->SetMute(false, nullptr);
+    }
+
     // std::cout << "___" << __func__ << std::endl;
     if (!m_SimpleAudioVolume) {
       return;
@@ -524,7 +563,7 @@ void CLoopbackCapture::UnMuteCapturedProcess()
 
     HRESULT hr = m_SimpleAudioVolume->SetMute(false, NULL);
     if (hr != S_OK) {
-      std::wcout << L"Failed to un-mute application." << std::endl;
+      std::wcout << L"Failed to un-mute application or session." << std::endl;
     }
 }
 
