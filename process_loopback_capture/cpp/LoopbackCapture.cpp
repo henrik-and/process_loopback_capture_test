@@ -209,6 +209,9 @@ HRESULT CLoopbackCapture::ActivateCompleted(IActivateAudioInterfaceAsyncOperatio
             // Now, m_AudioClient is a fully initialized instance of IAudioClient that we can use for audio capture.
             RETURN_IF_FAILED(punkAudioInterface.copy_to(&m_AudioClient));
 
+            // This interface is not supported
+            // RETURN_IF_FAILED(m_AudioClient->GetService(IID_PPV_ARGS(&m_SimpleAudioVolume)));
+
             // The app can also call m_AudioClient->GetMixFormat instead to get the capture format.
             // 16 - bit PCM format.
             m_CaptureFormat.wFormatTag = WAVE_FORMAT_PCM;
